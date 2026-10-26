@@ -1146,7 +1146,6 @@ fn parse_flt_mul_wide(a: u64, b: u64) -> u64, u64 {
     return a1 * b1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32), (mid << 32) | (p00 & 0xFFFFFFFF);
 }
 
-
 // Correct rounding for w * 10^e10, |e10| <= 27, where the comparisons
 // fit 128 bits: 5^27 is below 2^63.
 fn parse_flt_round_near(w: u64, e10: i64, v: f64) -> f64 {
