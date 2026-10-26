@@ -69,7 +69,10 @@ jobs:
       # breaks, which the formatter would report in every file.
       - name: Check formatting
         if: runner.os == 'Linux'
-        run: build/goose format --check samples stdlib
+        run: |
+          build/goose format stdlib/std.goose
+          git --no-pager diff -- stdlib/std.goose
+          exit 1
 
       - name: Test
         run: python test/run_tests.py --exe build/${{ runner.os == 'Windows' && 'Debug/goose.exe' || 'goose' }} --profile baseline --cc native --require-clang
