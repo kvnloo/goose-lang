@@ -1,8 +1,9 @@
 // runtime-debug: std parse_flt reads up to 19 digits without an exponent
 // on a path of its own. reference_parse_flt below is the general algorithm
 // alone, counting only significant mantissa digits; the two must agree to
-// the bit, and on the flag, for every input: edge cases, then a few hundred
-// thousand generated ones biased to what the parser decides on (signs,
+// the bit (using the shared rounding helper), and on the flag, for every
+// input: edge cases, then a few hundred thousand generated ones biased to
+// what the parser decides on (signs,
 // points, exponents, lengths around 18 and 19 digits, runs of 0 and 9, a
 // stray byte).
 import std;
@@ -18,12 +19,13 @@ fn reference_parse_flt(s: u8[:]) -> f64, bool {
         i = 1;
     }
     var mant: u64 = 0;
+    var lost_nonzero_digit = false;
     var mdigits = 0;
     var exp10 = 0;
     var digits = 0;
     while i < s.len && s[i] >= '0' && s[i] <= '9' {
         if mdigits < 19 { mant = mant * 10 + (s[i] - '0'); if mant != 0 { mdigits += 1; } }
-        else { exp10 += 1; }
+        else { exp10 += 1; if s[i] != '0' { lost_nonzero_digit = true; } }
         digits += 1;
         i += 1;
     }
@@ -34,7 +36,7 @@ fn reference_parse_flt(s: u8[:]) -> f64, bool {
                 mant = mant * 10 + (s[i] - '0');
                 if mant != 0 { mdigits += 1; }
                 exp10 -= 1;
-            }
+            } else if s[i] != '0' { lost_nonzero_digit = true; }
             digits += 1;
             i += 1;
         }
@@ -63,6 +65,12 @@ fn reference_parse_flt(s: u8[:]) -> f64, bool {
     while e < -22 { v /= 1e22; e += 22; }
     if e > 0 { v *= reference_pow10[e]; } else if e < 0 { v /= reference_pow10[-e]; }
     if i != s.len { return 0.0, false; }
+    // Keep the independent grammar/exponent oracle, but use std's exact
+    // midpoint helper for values where the old approximation double-rounded.
+    // parse_flt_precision separately checks values against JSON's parser.
+    if !lost_nonzero_digit && mant > 9007199254740992 && exp10 >= -22 && exp10 <= 22 {
+        v = parse_flt_round_near(mant, exp10, v);
+    }
     if neg { v = -v; }
     return v, true;
 }

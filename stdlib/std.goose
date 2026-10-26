@@ -1112,6 +1112,91 @@ fn parse_int(s: u8[:], base: i64 = 10) -> i64, bool {
 const parse_flt_pow10: f64[23] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
                                   1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22];
 
+// Correct rounding for mantissas beyond 2^53, adapted from json.goose's
+// round_near/compare_near path. The project's original 128-bit midpoint
+// comparisons avoid double rounding from a u64-to-f64 conversion followed by
+// decimal scaling. The general fallback below remains in place.
+const parse_flt_max_exact: u64 = 9007199254740992;
+extern fn parse_flt_ldexp(x: f64, e: i32) -> f64 = "ldexp";
+
+const parse_flt_pow5: u64[28] = [1, 5, 25, 125, 625, 3125, 15625, 78125, 390625, 1953125, 9765625, 48828125,
+                     244140625, 1220703125, 6103515625, 30517578125, 152587890625, 762939453125,
+                     3814697265625, 19073486328125, 95367431640625, 476837158203125, 2384185791015625,
+                     11920928955078125, 59604644775390625, 298023223876953125, 1490116119384765625,
+                     7450580596923828125];
+
+// The bits of a double.
+fn parse_flt_bits_of(x: f64) -> u64 {
+    let a: f64[1] = [x];
+    let b = bytes_of(a);
+    return b[0] | (b[1] as u64) << 8 | (b[2] as u64) << 16 | (b[3] as u64) << 24 |
+        (b[4] as u64) << 32 | (b[5] as u64) << 40 | (b[6] as u64) << 48 | (b[7] as u64) << 56;
+}
+
+// a * b in 128 bits: the high and the low half.
+fn parse_flt_mul_wide(a: u64, b: u64) -> u64, u64 {
+    let a0 = a & 0xFFFFFFFF;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFF;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFF) + (p10 & 0xFFFFFFFF);
+    return a1 * b1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32), (mid << 32) | (p00 & 0xFFFFFFFF);
+}
+
+// Correct rounding for w * 10^e10, |e10| <= 27, where the comparisons
+// fit 128 bits: 5^27 is below 2^63.
+fn parse_flt_round_near(w: u64, e10: i64, v: f64) -> f64 {
+    let b = parse_flt_bits_of(v);
+    let m0 = (b & 0xFFFFFFFFFFFFF) | 0x10000000000000;
+    let be = ((b >> 52) & 0x7FF) as! i64;
+    let k0 = be - 1075;
+    var m = m0;
+    var k = k0;
+    loop {
+        let up = parse_flt_compare_near(w, e10, 2 * m + 1, k - 1);
+        if up > 0 || (up == 0 && m % 2 == 1) {
+            m++;
+            if m == parse_flt_max_exact { m = parse_flt_max_exact / 2; k++; }
+            continue;
+        }
+        let down = if m == parse_flt_max_exact / 2 { parse_flt_compare_near(w, e10, 4 * m - 1, k - 2) }
+                   else { parse_flt_compare_near(w, e10, 2 * m - 1, k - 1) };
+        if down < 0 || (down == 0 && m % 2 == 1) {
+            m--;
+            if m < parse_flt_max_exact / 2 { m = 2 * m + 1; k--; }
+            continue;
+        }
+        break;
+    }
+    return if m == m0 && k == k0 { v } else { parse_flt_ldexp(m, k as! i32) };
+}
+
+// w * 10^e10 against h * 2^p. That is w * 5^e10 against
+// h * 2^(p - e10), the power of five on whichever side keeps it whole; the
+// two are within a few ulps of each other, so the one shifted left to line
+// them up stays within 128 bits.
+fn parse_flt_compare_near(w: u64, e10: i64, h: u64, p: i64) -> i64 {
+    var ah: u64 = 0;
+    var al = w;
+    var bh: u64 = 0;
+    var bl = h;
+    if e10 >= 0 { ah, al = parse_flt_mul_wide(w, parse_flt_pow5[e10]); } else { bh, bl = parse_flt_mul_wide(h, parse_flt_pow5[-e10]); }
+    let d = e10 - p;
+    if d > 0 { ah, al = parse_flt_shl_wide(ah, al, d); } else if d < 0 { bh, bl = parse_flt_shl_wide(bh, bl, -d); }
+    if ah != bh { return if ah < bh { -1 } else { 1 }; }
+    if al != bl { return if al < bl { -1 } else { 1 }; }
+    return 0;
+}
+
+// The 128-bit h * 2^64 + l shifted left by s, 0 < s < 128.
+fn parse_flt_shl_wide(h: u64, l: u64, s: i64) -> u64, u64 {
+    if s >= 64 { return l << (s - 64), 0; }
+    return (h << s) | (l >> (64 - s)), l << s;
+}
+
 // A decimal float with optional sign, fraction and exponent; false otherwise.
 fn parse_flt(s: u8[:]) -> f64, bool {
     var i = 0;
@@ -1147,17 +1232,20 @@ fn parse_flt(s: u8[:]) -> f64, bool {
         digits -= exp10;
     }
     if digits == 0 { return 0.0, false; }
-    // Up to 19 digits fit a u64 exactly. With no exponent either, the value
-    // is that integer over an exact power of ten, the scaling below in one
-    // step. Up to 18 they fit an i64 too, which converts to f64 in one
-    // instruction where a u64 takes several on x86-64, to the same value.
+    // Up to 19 digits fit a u64. Values whose mantissa is at most 2^53
+    // scale in one correctly rounded step; larger mantissas need an exact
+    // midpoint comparison to avoid rounding first during conversion to f64.
     if digits <= 19 && i == s.len {
         var v = 0.0;
         if digits <= 18 { v = mant as! i64; } else { v = mant; }
-        if exp10 < 0 { v /= parse_flt_pow10[-exp10]; }
+        if exp10 < 0 {
+            v /= parse_flt_pow10[-exp10];
+            if mant > parse_flt_max_exact { v = parse_flt_round_near(mant, exp10, v); }
+        }
         if neg { v = -v; }
         return v, true;
     }
+    var lost_nonzero_digit = false;
     if digits > 19 {
         // mant may have wrapped above: read the digits again keeping the
         // first 19 significant digits, with the exponent counting integer
@@ -1170,7 +1258,10 @@ fn parse_flt(s: u8[:]) -> f64, bool {
         while j < s.len && s[j] == '0' { j += 1; }
         while j < s.len && s[j] - '0' < 10 {
             if mdigits < 19 { mant = mant * 10 + (s[j] - '0'); mdigits += 1; }
-            else { exp10 += 1; }
+            else {
+                exp10 += 1;
+                if s[j] != '0' { lost_nonzero_digit = true; }
+            }
             j += 1;
         }
         if j < s.len && s[j] == '.' {
@@ -1180,6 +1271,7 @@ fn parse_flt(s: u8[:]) -> f64, bool {
             }
             while j < s.len && s[j] - '0' < 10 {
                 if mdigits < 19 { mant = mant * 10 + (s[j] - '0'); mdigits += 1; exp10 -= 1; }
+                else if s[j] != '0' { lost_nonzero_digit = true; }
                 j += 1;
             }
         }
@@ -1201,17 +1293,19 @@ fn parse_flt(s: u8[:]) -> f64, bool {
         if edigits == 0 { return 0.0, false; }
         exp10 += if eneg { -e } else { e };
     }
-    // A mantissa below 2^53 converts exactly and a power of ten up to 10^22
-    // is exact in binary64, so one multiply or divide is correctly rounded
-    // (Clinger's fast path); longer inputs and larger exponents scale in
-    // steps and may be off by an ulp. A longer mantissa rounds as it
-    // converts.
+    // Exact mantissas with exponents within +/-22 use Clinger's fast path.
+    // Larger mantissas in that range are corrected by integer midpoint
+    // comparisons when no nonzero significant digits were discarded.
+    // Outside that range, stepwise scaling can still be off by an ulp.
     var v: f64 = mant;
     var e = exp10;
     while e > 22 { v *= 1e22; e -= 22; }
     while e < -22 { v /= 1e22; e += 22; }
     if e > 0 { v *= parse_flt_pow10[e]; } else if e < 0 { v /= parse_flt_pow10[-e]; }
     if i != s.len { return 0.0, false; }
+    if !lost_nonzero_digit && mant > parse_flt_max_exact && exp10 >= -22 && exp10 <= 22 {
+        v = parse_flt_round_near(mant, exp10, v);
+    }
     if neg { v = -v; }
     return v, true;
 }
