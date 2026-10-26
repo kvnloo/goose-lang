@@ -1,8 +1,9 @@
 // runtime-debug: std parse_flt reads up to 19 digits without an exponent
 // on a path of its own. reference_parse_flt below is the general algorithm
 // alone, counting only significant mantissa digits; the two must agree to
-// the bit (using the shared exact rounding helper), and on the flag, for every input: edge cases, then a few hundred
-// thousand generated ones biased to what the parser decides on (signs,
+// the bit (using the shared rounding helper), and on the flag, for every
+// input: edge cases, then a few hundred thousand generated ones biased to
+// what the parser decides on (signs,
 // points, exponents, lengths around 18 and 19 digits, runs of 0 and 9, a
 // stray byte).
 import std;
