@@ -1160,7 +1160,7 @@ fn parse_flt_round_near(w: u64, e10: i64, v: f64) -> f64 {
         let up = parse_flt_compare_near(w, e10, 2 * m + 1, k - 1);
         if up > 0 || (up == 0 && m % 2 == 1) {
             m++;
-            if m == MAX_EXACT { m = parse_flt_max_exact / 2; k++; }
+            if m == parse_flt_max_exact { m = parse_flt_max_exact / 2; k++; }
             continue;
         }
         let down = if m == parse_flt_max_exact / 2 { parse_flt_compare_near(w, e10, 4 * m - 1, k - 2) }
